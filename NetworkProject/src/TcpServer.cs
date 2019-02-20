@@ -16,13 +16,13 @@ using System.Threading.Tasks;
 
 namespace Inew.Network
 {
-    class TcpServer
+    public class TcpServer
     {
         // サーバのソケット接続上限
         private const int LIMIT_CONNECT = 5;
 
         // 送受信時のパケットのバッファサイズ
-        private const int BUFFER_SIZE = 1400; 
+        private const int BUFFER_SIZE = 1400;
 
         private TcpListener _listener;
         private List<TcpClientData> _clients;
@@ -33,10 +33,12 @@ namespace Inew.Network
         private bool _communicateLoop = false;
 
         // イベント通知
-        public delegate void EventHandler(NetEventState state);
-        private EventHandler _handler;
+        public Action<NetEventState> NetEventHandler { get; set; }
+        public Action<string> OnDataReceived { get; set; }
 
-        private object _lockObj = new object();
+        private readonly object _lockObj = new object();
+
+        private static SynchronizationContext _mainContext;
 
         /// <summary>
         /// クライアントとの通信に必要なデータセット
@@ -60,6 +62,7 @@ namespace Inew.Network
         public TcpServer(Encoding enc = null)
         {
             _clients = new List<TcpClientData>();
+            _mainContext = SynchronizationContext.Current;
 
             _encoding = enc ?? Encoding.UTF8;
         }
@@ -129,11 +132,12 @@ namespace Inew.Network
 #endif
 
                     // 接続完了を通知
-                    if (_handler != null) {
+                    if (NetEventHandler != null) {
                         NetEventState state = new NetEventState();
                         state.type = NetEventType.Connect;
                         state.result = NetEventResult.Success;
-                        _handler(state);
+
+                        _mainContext.Post(_ => NetEventHandler(state), null);
                     }
                 }
                 catch (ObjectDisposedException)
@@ -179,9 +183,9 @@ namespace Inew.Network
                         }
                         else
                         {
-                            SendCommunication(i);
+                            SendCommunication(_clients[i]);
 
-                            RecvCommunication(i);
+                            RecvCommunication(_clients[i]);
                         }
                     }
                 }
@@ -199,10 +203,8 @@ namespace Inew.Network
         /// スレッドセーフなキューに格納されているメッセージをクライアントに送信します
         /// </summary>
         /// <param name="clientNum"></param>
-        private void SendCommunication(int clientNum)
+        private void SendCommunication(TcpClientData client)
         {
-            var client = _clients[clientNum];
-
             try {
                 // 送信処理.
                 if (client.Connected)
@@ -212,43 +214,53 @@ namespace Inew.Network
                     int sendSize = client.sendQueue.Dequeue(ref buffer, BUFFER_SIZE);
 
                     while (sendSize > 0) {
+                        Console.WriteLine(_encoding.GetString(buffer, 0, BUFFER_SIZE));
                         client.stream.Write(buffer, 0, sendSize);
                         sendSize = client.sendQueue.Dequeue(ref buffer, BUFFER_SIZE);
-                    }
-                }
-            }
-            catch {
-                return;
-            }
-        }
-
-        private void RecvCommunication(int clientNum)
-        {
-            /*
-            // 受信処理.
-            try
-            {
-                while (m_socket.Poll(0, SelectMode.SelectRead))
-                {
-                    byte[] buffer = new byte[BUFFER_SIZE];
-
-                    int recvSize = m_socket.Receive(buffer, buffer.Length, SocketFlags.None);
-                    if (recvSize == 0)
-                    {
-                        // 切断.
-                        Debug.Log("Disconnect recv from client.");
-                        Disconnect();
-                    }
-                    else if (recvSize > 0)
-                    {
-                        m_recvQueue.Enqueue(buffer, recvSize);
                     }
                 }
             }
             catch
             {
                 return;
-            }*/
+            }
+        }
+
+        private void RecvCommunication(TcpClientData client)
+        {
+            // 受信処理.
+            try
+            {
+                var ns = client.client.GetStream();
+                var ms = new MemoryStream();
+
+                while (client.client.Available > 0)
+                {
+                    byte[] buffer = new byte[BUFFER_SIZE];
+
+                    //データの一部を受信する
+                    var resSize = ns.Read(buffer, 0, buffer.Length);
+                    //Readが0を返した時はクライアントが切断したと判断
+                    if (resSize == 0)
+                    {
+                        DisConnect(client);
+                        break;
+                    }
+                    //受信したデータを蓄積する
+                    ms.Write(buffer, 0, resSize);
+                }
+
+                int messageSize = (int)ms.Length;
+                if (messageSize > 0)
+                {
+                    var message = _encoding.GetString(ms.GetBuffer(), 0, messageSize);
+                    _mainContext.Post(_ => OnDataReceived?.Invoke(message), null);
+                }
+            }
+            catch
+            {
+                return;
+            }
         }
 
         /// <summary>
@@ -337,7 +349,7 @@ namespace Inew.Network
             }
 
             // 切断を通知します.
-            _handler?.Invoke(state);
+            _mainContext.Post(_ => NetEventHandler?.Invoke(state), null);
         }
 
         /// <summary>
@@ -356,25 +368,6 @@ namespace Inew.Network
             UnityEngine.Debug.Log("[Server] Server stopped.");
 #endif
         }
-
-
-        /// <summary>
-        /// イベント通知関数登録
-        /// </summary>
-        /// <param name="handler"></param>
-        public void RegisterEventHandler(EventHandler handler)
-        {
-            _handler += handler;
-        }
-
-        /// <summary>
-        /// イベント通知関数削除
-        /// </summary>
-        /// <param name="handler"></param>
-        public void UnregisterEventHandler(EventHandler handler)
-        {
-            _handler -= handler;
-        }
-
+        
     }
 }
